@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 .monaco-workbench .quick-input-list .quick-input-list-entry.has-actions:hover .quick-input-list-entry-action-bar .action-label.dirty-workspace::before {
-	content: "\ea76"; /* Close icon flips between black dot and "X" for dirty workspaces */
+	/* Close icon flips between black dot and "X" for dirty workspaces */
+	content: var(--vscode-icon-x-content);
+	font-family: var(--vscode-icon-x-font-family);
 }
 
 .monaco-workbench .screencast-mouse {
@@ -33,7 +35,7 @@
 	text-overflow: ellipsis;
 }
 
-.monaco-workbench:not(.reduce-motion) .screencast-keyboard {
+.monaco-workbench.monaco-enable-motion .screencast-keyboard {
 	transition: opacity 0.3s ease-out;
 }
 

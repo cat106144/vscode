@@ -3,9 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { range } from 'vs/base/common/arrays';
-import { CancellationToken, CancellationTokenSource } from 'vs/base/common/cancellation';
-import { canceled } from 'vs/base/common/errors';
+import { range } from './arrays.js';
+import { CancellationToken, CancellationTokenSource } from './cancellation.js';
+import { CancellationError } from './errors.js';
 
 /**
  * A Pager is a stateless abstraction over a paged collection.
@@ -15,6 +15,13 @@ export interface IPager<T> {
 	total: number;
 	pageSize: number;
 	getPage(pageIndex: number, cancellationToken: CancellationToken): Promise<T[]>;
+}
+
+export interface IPageIterator<T> {
+	elements: T[];
+	total: number;
+	hasNextPage: boolean;
+	getNextPage(cancellationToken: CancellationToken): Promise<IPageIterator<T>>;
 }
 
 interface IPage<T> {
@@ -91,7 +98,7 @@ export class PagedModel<T> implements IPagedModel<T> {
 
 	resolve(index: number, cancellationToken: CancellationToken): Promise<T> {
 		if (cancellationToken.isCancellationRequested) {
-			return Promise.reject(canceled());
+			return Promise.reject(new CancellationError());
 		}
 
 		const pageIndex = Math.floor(index / this.pager.pageSize);
@@ -154,12 +161,12 @@ export class DelayedPagedModel<T> implements IPagedModel<T> {
 	resolve(index: number, cancellationToken: CancellationToken): Promise<T> {
 		return new Promise((c, e) => {
 			if (cancellationToken.isCancellationRequested) {
-				return e(canceled());
+				return e(new CancellationError());
 			}
 
 			const timer = setTimeout(() => {
 				if (cancellationToken.isCancellationRequested) {
-					return e(canceled());
+					return e(new CancellationError());
 				}
 
 				timeoutCancellation.dispose();
@@ -169,9 +176,92 @@ export class DelayedPagedModel<T> implements IPagedModel<T> {
 			const timeoutCancellation = cancellationToken.onCancellationRequested(() => {
 				clearTimeout(timer);
 				timeoutCancellation.dispose();
-				e(canceled());
+				e(new CancellationError());
 			});
 		});
+	}
+}
+
+/**
+ * A PageIteratorPager wraps an IPageIterator to provide IPager functionality.
+ * It caches pages as they are accessed and supports random page access by
+ * sequentially loading pages until the requested page is reached.
+ */
+export class PageIteratorPager<T> implements IPager<T> {
+	private cachedPages: T[][] = [];
+	private currentIterator: IPageIterator<T>;
+	private isComplete: boolean = false;
+	private pendingRequests = new Map<number, Promise<void>>();
+
+	public readonly firstPage: T[];
+	public readonly pageSize: number;
+	public readonly total: number;
+
+	constructor(initialIterator: IPageIterator<T>) {
+		this.currentIterator = initialIterator;
+		this.firstPage = [...initialIterator.elements];
+		this.pageSize = initialIterator.elements.length || 1; // Use first page size as page size
+		this.cachedPages[0] = this.firstPage;
+		this.isComplete = !initialIterator.hasNextPage;
+		this.total = initialIterator.total;
+	}
+
+	async getPage(pageIndex: number, cancellationToken: CancellationToken): Promise<T[]> {
+		if (cancellationToken.isCancellationRequested) {
+			throw new CancellationError();
+		}
+
+		// If we already have this page cached, return it
+		if (pageIndex < this.cachedPages.length) {
+			return this.cachedPages[pageIndex];
+		}
+
+		// If we're complete and don't have this page, it doesn't exist
+		if (this.isComplete) {
+			throw new Error(`Page ${pageIndex} is out of bounds. Total pages: ${this.cachedPages.length}`);
+		}
+
+
+		// Check if there's already a pending request that will load this index
+		// (any pending request for an index >= our requested index)
+		let promise: Promise<void> | undefined;
+		for (const [pendingPageIndex, pendingPromise] of this.pendingRequests) {
+			if (pendingPageIndex >= pageIndex) {
+				promise = pendingPromise;
+				break;
+			}
+		}
+
+		if (!promise) {
+			promise = this.loadPagesUntil(pageIndex, cancellationToken);
+			this.pendingRequests.set(pageIndex, promise);
+		}
+
+		try {
+			await promise;
+			if (pageIndex >= this.cachedPages.length) {
+				throw new Error(`Page ${pageIndex} is out of bounds. Total pages: ${this.cachedPages.length}`);
+			}
+			return this.cachedPages[pageIndex];
+		} finally {
+			if (this.pendingRequests.has(pageIndex)) {
+				this.pendingRequests.delete(pageIndex);
+			}
+		}
+	}
+
+	private async loadPagesUntil(targetPageIndex: number, cancellationToken: CancellationToken): Promise<void> {
+		while (targetPageIndex >= this.cachedPages.length && this.currentIterator.hasNextPage) {
+			if (cancellationToken.isCancellationRequested) {
+				throw new CancellationError();
+			}
+
+			this.currentIterator = await this.currentIterator.getNextPage(cancellationToken);
+			this.cachedPages.push([...this.currentIterator.elements]);
+		}
+		if (!this.currentIterator.hasNextPage) {
+			this.isComplete = true;
+		}
 	}
 }
 
